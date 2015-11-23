@@ -1,0 +1,383 @@
+---
+title: "Supreme Court Opinions"
+author: "Nicholas Capofari"
+date: "November 9, 2015"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+The aim of this post is to analyze bench opinions written by the Supreme Court to answer the following questions:  
+* Is it possible to determine which Supreme Court justice wrote the court's majority opinion for a particular case?  
+* Is it possible determine whether the majority opinion was written by a Supreme Court Justice with a liberal or conservative affiliation?  
+
+Adapted from "Automated Data Collection with R" Chapter 10, by Munzert, Rubba, Meibner, Nyhuis.  
+
+I want to use our text book as a guide for my first foray into statistical text processing.  
+
+```{r set-options, echo=FALSE, cache=FALSE}
+options(width = 120)
+suppressMessages(suppressWarnings(library(RCurl)))
+suppressMessages(suppressWarnings(library(XML)))
+suppressMessages(suppressWarnings(library(stringr)))
+suppressMessages(suppressWarnings(library(tm)))
+suppressMessages(suppressWarnings(library(RTextTools)))
+suppressMessages(suppressWarnings(library(wordcloud)))
+suppressMessages(suppressWarnings(library(scales)))
+```
+
+###Gathering the Opinions  
+All opinions came from the Cornell University Law School's [Legal Information Institute](www.law.cornell.edu).  
+
+```{r}
+#library(RCurl)
+#library(XML)
+#library(stringr)
+#library(tm)
+#library(RTextTools)
+#library(wordcloud)
+#library(scales)
+
+base_url <- "https://www.law.cornell.edu"
+
+#create a handle so I can leave my information when I extract the urls
+signatures = system.file("CurlSSL", caininfo = "cacert.pem", 
+                         package = "RCurl")
+handle = getCurlHandle(cainfo = signatures, 
+                        httpheader = list(from="ncapofari@yahoo.com",
+                        'user-agent' = str_c(R.version$version.string,
+                        ", ", R.version$platform)))
+
+#function to extract the html files of court issued opinions
+get_opinions <- function(x, directory){
+  #pass the function a judge's last name 
+  #function will create html files on the local drive
+  #each html file corresponds to a supreme court case 
+  #where the judge wrote the majority opinion
+  justice_url <- sprintf("/supct/author.php?%s#OPIN", x)
+  url <- getURL(str_c(base_url, justice_url))
+  #parse html doc
+  parsed <- htmlParse(url)
+  #find the useful links
+  links_list <- xpathApply(parsed, "//ul")
+  links <- getHTMLLinks(links_list[[10]])
+  #don't need every decision ever so set limit at 100
+  len <- 100
+  #for justices without 100 
+  if(length(links) < 100){len <- length(links)}
+  #for each link
+  for(i in 1:len){
+    url <- str_c(base_url, links[i])
+    #follow link and copy the html file
+    tmp <- getURL(url, cainfo = signatures)
+    #create html file with justice name and a number
+    new_file <- str_c(directory, "/", x, i, ".html")
+    write(tmp, new_file)
+  }
+}
+
+#list of current supreme court justices
+sc_justices <- c("Alito", "Breyer", "Ginsburg", "Kagan", "Kennedy", "Roberts", "Scalia", "Sotomayor", "Thomas")
+retired_justices <- c("O'Connor", "Stevens", "Rehnquist", "Powell", "Blackmun", "Burger", "Marshall", "Fortas", "Goldberg", "White", "Stewart")
+
+#create a directory
+dir.create("SC_Opinions", showWarnings = FALSE)
+if(length(list.files("SC_Opinions")) == 0){
+  #get opinions for each justice
+  for(i in 1:length(sc_justices)){
+    get_opinions(sc_justices[i], "SC_Opinions")
+  }
+}
+
+```
+
+###Creating a Corpus
+Now that we have these opinions as .html files on our local drive, we can create a corpus that contains these opinions.  I chose to save the .html files because I do not have full access to the internet where I work.  (Not just because this is how the authors of the text book do it).  
+
+When I ran the program for the first time I realized that some of the links did not contain the court's opinion.  I followed one such [link](www.law.cornell.edu/supremecourt/test/09-1272/#writing-ZO) to see what was going on.  After checking out this link and a few others, I realized that quite a few of the opinions were not in the links that are posted on the web site.  I was still able to scrape enough files to construct a viable corpus.  Next time I would like to not skip any cases so I would use a different site.
+
+```{r}
+#helper function to determine a judge's affiliation
+#these classifications are from www.insidegov.com
+get_affiliation <- function(judge){
+  libs <- c("Breyer", "Ginsburg", "Kagan", "Sotomayor")
+  ifelse(judge %in% libs, return("liberal"), return("conservative"))
+}
+
+#1st document to create the corpus to store all opinions
+tmp <- readLines(str_c("SC_Opinions/Alito1.html"))
+tmp <- str_c(tmp, collapse = "")
+tmp <- htmlParse(tmp)
+
+#extract the opinion of the court for the case
+opinion <- xpathSApply(tmp, "//p[@class='bodytext']", xmlValue)  
+opinion <- paste(opinion, collapse = '')
+
+#create corpus
+opinion_corpus <- Corpus(VectorSource(opinion))
+#create meta data
+meta(opinion_corpus[[1]], "author") <- "Alito"
+meta(opinion_corpus[[1]], "affiliation") <- get_affiliation("Alito")
+meta(opinion_corpus[[1]], "id") <- "Alito1.html"
+
+#function to create a corpus from the html files
+create_corpus <- function(corpus, directory){
+  directory <- str_c(directory, "/")
+  n <- 2
+  #for each file in the directory
+  for(i in n:length(list.files(directory))){
+    #extract judges name from file
+    justice <- str_extract(list.files(directory)[i], "[a-z|A-Z]*")
+    #parse the file
+    tmp <- readLines(str_c(directory,
+                           list.files(directory)[i]))
+    tmp <- str_c(tmp, collapse="")
+    tmp <- htmlParse(tmp)
+    #extract opinion
+    opinion <- xpathSApply(tmp, "//p[@class='bodytext']", xmlValue)
+    opinion <- paste(opinion, collapse = '')
+    #I did not realize til later but a good amount of the links 
+    #do not have any information in them
+    if(opinion == "") { next }
+    if(opinion != "") {
+      #if an opinion was generated create a temp corpus
+      tmp_corpus <- Corpus(VectorSource(opinion))
+      #combine the temp with the real corpus
+      corpus <- c(corpus, tmp_corpus)
+      #set meta data
+      meta(corpus[[n]], "author") <- justice
+      meta(corpus[[n]], "affiliation") <-
+        get_affiliation(justice)
+      meta(corpus[[n]], "id") <- list.files(directory)[i]
+      n <- n + 1
+    }
+  }
+  return(corpus)
+} 
+  
+opinion_corpus <- create_corpus(opinion_corpus, "SC_Opinions") 
+```
+
+###Corpus Summary
+These tables represent the number of case where each judge wrote the majority opinion.  The document for each case includes the syllabus, the majority opinion, and all dissents and consents.
+
+```{r}
+table(as.character(meta(opinion_corpus, "author")))
+table(as.character(meta(opinion_corpus, "affiliation")))
+```
+
+These are the words that appear most when a liberal justice writes the majority opinion.  
+
+```{r, warning=FALSE}
+#function to create a a term document matrix from a corpus
+create_tdm <- function(a_corpus){
+  tdm <- TermDocumentMatrix(a_corpus, 
+                            control = 
+                              list(removePunctuation=TRUE, 
+                                   removeNumbers=TRUE, 
+                                   stopwords=TRUE))
+  tdm <- removeSparseTerms(tdm, 0.99)
+  return(tdm)
+}
+
+#function to create a word cloud from a tdm
+my_wordcloud <- function(tdm){
+  m <- as.matrix(tdm)
+  v <- sort(rowSums(m), decreasing=TRUE)
+  df <- data.frame(word = names(v), freq = v)
+  df$prop <- df$freq/sum(df$freq)
+  #remove all terms with unicode
+  df$word <- str_replace_all(df$word, "[^[a-z|\\s]]", "")
+  set.seed(1234)
+  wordcloud(words = df$word, freq = df$freq, 
+            min.freq = 1000, max.words = 150,
+            random.order = FALSE, rot.per = 0.35,
+            colors = brewer.pal(8, "Dark2"),)
+  return(df)
+}
+```
+
+```{r, warning=FALSE}
+lib_index <- meta(opinion_corpus, "affiliation") == "liberal"
+liberal <- my_wordcloud(create_tdm(opinion_corpus[lib_index]))
+```
+
+```{r}
+liberal$affiliation = "liberal"
+head(liberal)
+```
+
+These are the words that appear most when a conservative justice writes the majority opinion.
+
+```{r, warning=FALSE}
+con_index <- meta(opinion_corpus, "affiliation") == "conservative"
+conservative <- my_wordcloud(create_tdm(opinion_corpus[con_index]))
+```
+
+```{r}
+conservative$affiliation = "conservative"
+head(conservative)
+```
+
+The term frequencies seem similar for each subset of the corpus.  But what if we compared them to each other in one word cloud...
+
+```{r, warning=FALSE}
+#this is a way to retrieve the text from a corpus
+l <- data.frame(text=unlist(sapply(opinion_corpus[lib_index], `[`, "content")), stringsAsFactors=F)
+c <- data.frame(text=unlist(sapply(opinion_corpus[con_index], `[`, "content")), stringsAsFactors=F)
+
+#clean the text up
+all_lib_ops <- str_replace_all(l[1,], "[^[A-z|\\s]]", "")
+all_con_ops <- str_replace_all(c[1,], "[^[A-z|\\s]]", "")
+
+#create a new 2 document corpus
+corp <- Corpus(VectorSource(c(all_lib_ops, all_con_ops)))
+new_tdm <- create_tdm(corp)
+new_tdm <- as.matrix(new_tdm)
+colnames(new_tdm) <- c("liberal", "conservative")
+
+comparison.cloud(new_tdm, random.order=FALSE, 
+  colors = c("#00B2FF", "red", "#FF0099", "#6600CC"),
+  title.size=1.5, max.words=80)
+```
+
+###Creating a Document Term Matrix
+
+```{r}
+#function takes a corpus and returns a document term matrix
+create_dtm <- function(corpus){
+  #use only lower case letters
+  opin_corpus <- tm_map(corpus, tolower)
+  #reset the documents to perform more functions
+  #I found this helped when using functions in tm_map
+  #that are not part of the tm package
+  opin_corpus <- tm_map(opin_corpus, PlainTextDocument)
+  #remove all punctuation and numbers
+  opin_corpus <- tm_map(opin_corpus, 
+                        str_replace_all, "[^[a-z|\\s]]", "")
+  #remove the names of any justices
+  #it would be too easy if we left them in
+  #remove stop words too
+  #and types of justices
+  opin_corpus <- tm_map(opin_corpus, 
+                        removeWords, 
+                        words = c(tolower(sc_justices), 
+                                  tolower(retired_justices),
+                                  stopwords("english"),
+                                  c("chief", "junior", "associate")))
+  #reset the document...seems to help text removal
+  opin_corpus <- tm_map(opin_corpus, PlainTextDocument)
+  #use only word stems
+  opin_corpus <- tm_map(opin_corpus, stemDocument)
+  #create a document term matrix
+  dtm <- DocumentTermMatrix(opin_corpus)
+  #remove words that appear in 3 documents or less
+  dtm <- removeSparseTerms(dtm, 1-(3/length(corpus)))
+  return(dtm)
+}
+
+dtm <- create_dtm(opinion_corpus)
+#save copy of all terms
+write(unlist(dtm$dimnames[2]), "dtm.txt")
+```
+
+###Supervised Learning Techniques
+
+Using the RTextTools package we will train the program to determine the majority opinion's author and their affiliation.
+
+```{r}
+n = nrow(dtm)
+#random sample to use as training data
+train = sort(sample(1:n, n*.8))
+#test the rest
+test = sort(setdiff(1:n, train))
+
+#see if we can detect the majority opinion author
+op_list <- unlist(meta(opinion_corpus, "author"))
+#create a container to store our information
+container <- create_container(dtm,
+                              labels = op_list,
+                              trainSize = train,
+                              testSize = test,
+                              virgin = FALSE)
+#test these 3 models
+svm_model <- train_model(container, "SVM")
+tree_model <- train_model(container, "TREE")
+maxent_model <- train_model(container, "MAXENT")
+
+svm_out <- classify_model(container, svm_model)
+tree_out <- classify_model(container, tree_model)
+maxent_out <- classify_model(container, maxent_model)
+
+#create a data frame to view the results
+comparisons <- data.frame(
+  id = unlist(meta(opinion_corpus[test], "id")),
+  correct_author = op_list[test],
+  svm_author = as.character(svm_out[,1]),
+  svm_prob = as.character(svm_out[,2]),
+  tree_author = as.character(tree_out[,1]),
+  tree_prob = as.character(tree_out[,2]),
+  maxent_author = as.character(maxent_out[,1]),
+  maxent_prob = as.character(maxent_out[,2]),
+  stringsAsFactors = FALSE)
+head(comparisons)
+```
+
+Now let's take a look at our affiliation training.
+
+```{r}
+#see if we can detect the party affiliation of the author
+op_list_i <- unlist(meta(opinion_corpus, "affiliation"))
+#create a container to store our information
+container_i <- create_container(dtm,
+                              labels = op_list_i,
+                              trainSize = train,
+                              testSize = test,
+                              virgin = FALSE)
+#test these 3 models
+svm_model_i <- train_model(container_i, "SVM")
+tree_model_i <- train_model(container_i, "TREE")
+maxent_model_i <- train_model(container_i, "MAXENT")
+
+svm_out_i <- classify_model(container_i, svm_model_i)
+tree_out_i <- classify_model(container_i, tree_model_i)
+maxent_out_i <- classify_model(container_i, maxent_model_i)
+
+#create a data frame to view the results
+comparisons_i <- data.frame(
+  id = unlist(meta(opinion_corpus[test], "id")),
+  correct_affiliation = op_list_i[test],
+  svm_affiliation = as.character(svm_out_i[,1]),
+  svm_prob = as.character(svm_out_i[,2]),
+  tree_affiliation = as.character(tree_out_i[,1]),
+  tree_prob = as.character(tree_out_i[,2]),
+  maxent_affiliation = as.character(maxent_out_i[,1]),
+  maxent_prob = as.character(maxent_out_i[,2]),
+  stringsAsFactors = FALSE)
+head(comparisons_i)
+```
+
+###Summary of Outcomes
+
+```{r}
+final_df <- cbind(comparisons, comparisons_i)
+totals <- data.frame(rbind(
+  table(final_df$correct_author == final_df$svm_author),
+  table(final_df$correct_author == final_df$tree_author),
+  table(final_df$correct_author == final_df$maxent_author),
+  table(final_df$correct_affiliation == final_df$svm_affiliation),
+  table(final_df$correct_affiliation == final_df$tree_affiliation),
+  table(final_df$correct_affiliation == final_df$maxent_affiliation)
+))
+totals$model <- c("svm_author", "tree_author", "maxent_author",
+                  "svm_affiliation", "tree_affiliation", "maxent_affiliation")
+totals$percent_correct <- percent(totals$TRUE./(totals$FALSE.+totals$TRUE.))
+
+totals
+```
+
+###Possible Applications
+I was not able to generate a good prediction model to determine the majority opinion writer of a Supreme Court decision.  There are plenty of reasons why I failed.  The most obvious reason, and the most glaring error I committed, is that I included the entire slip opinion, instead of focusing upon just the majority opinion of each case.  Even though the models were better than just a random guess, if I focused upon just the majority opinion the results would be better.  
+
+The affiliation models created more accurate predictions.  With severe enhancements, these models could be used to predict the affiliation of future nominees of the Supreme Court.  Even though a Justice may be nominated by a conservative or liberal Congress, that is not necessarily a bellwether of future decision making.  John Paul Stevens was a registered Republican when he was nominated to the Court, but by the end of his tenure he was widely considered to be on the liberal side of the Court.  If a nominees' previous writings are evaluated, these models may be beneficial at establishing a firm understanding of the candidate's decision making. 
